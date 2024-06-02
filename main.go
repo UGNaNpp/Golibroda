@@ -3,63 +3,82 @@ package main
 import (
 	"fmt"
 	"math/rand"
-	"strconv"
 	"sync"
 	"time"
 )
 
-var waitingClients = 0;
-var waitingClientsMutex sync.Mutex; // Lepiej użyć semafora ale w go nie jest w bibliottece standardowej
-var nextCustomerMutex sync.Mutex;
-var barberMutex sync.Mutex;
-var clientsToday = 0;
+const (
+	MAX_CUSTOMERS = 8
+	NUM_CHAIRS    = 3
+)
 
-func main () {
-	barberMutex.Lock()
-	go barber();
-	for range 10 {
-		go nextCustomer();
-		time.Sleep(time.Duration(rand.Float64() * 2 * float64(time.Second)))
-	}
-}
-
-func nextCustomer() {
-	nextCustomerMutex.Lock()
-	waitingClientsMutex.Lock()
-	clientsToday++;
-	defer nextCustomerMutex.Unlock()
-	if waitingClients > 3 { // Jeśli równo max klientów wychodzimy
-		waitingClientsMutex.Unlock()
-		fmt.Println("Klient nr. ", clientsToday, " właśnie wyszedł nieobsłużony.")
-	} else if waitingClients > 0 {
-		waitingClients++;
-		waitingClientsMutex.Unlock()
-	} else {
-		waitingClients++;
-		barberMutex.Unlock();
-	}
-}
+var (
+	waitingCustomers []int
+	mutex            sync.Mutex
+	cond             = sync.NewCond(&mutex)
+	barberSleeping   = true
+)
 
 func barber() {
-	fmt.Println("Właśnie otwarto zakład fryzjerski")
-	defer fmt.Println("Barber zakończył pracę, idzie do domu")
 	for {
-		waitingClientsMutex.Lock(); // Zappewnia wyłącznie bezpieczny odczyt zmiennej
-		if waitingClients > 0 {
-			waitingClientsMutex.Unlock();
-			barberMutex.Lock()
-			waitingClients--;
-			time.Sleep(1 * time.Second)
-			fmt.Println("Obsługa " + strconv.Itoa(clientsToday) + " clienta dzisiaj.")
-			barberMutex.Unlock();
-		} else {
-			waitingClientsMutex.Unlock();
-			barberMutex.Lock() // * Zasypia i czeka na obudzenie
+		mutex.Lock()
+		for len(waitingCustomers) == 0 {
+			fmt.Println("The barber is sleeping...")
+			barberSleeping = true
+			cond.Wait()
 		}
-		if clientsToday > 5 {
-			break;
-		}
+
+		customer := waitingCustomers[0]
+		waitingCustomers = waitingCustomers[1:]
+		fmt.Printf("The barber is cutting hair for customer %d\n", customer)
+		mutex.Unlock()
+
+		time.Sleep(2 * time.Second)
+		fmt.Printf("The barber has finished cutting hair for customer %d\n", customer)
+
+		mutex.Lock()
+		barberSleeping = false
+		cond.Signal()
+		mutex.Unlock()
 	}
 }
 
+func customer(index int) {
+	time.Sleep(time.Duration(rand.Intn(5)+1) * time.Second)
 
+	mutex.Lock()
+	if len(waitingCustomers) < NUM_CHAIRS {
+		waitingCustomers = append(waitingCustomers, index)
+		fmt.Printf("Customer %d is waiting in the waiting room\n", index)
+
+		if barberSleeping {
+			cond.Signal()
+		}
+		mutex.Unlock()
+
+		mutex.Lock()
+		for barberSleeping {
+			cond.Wait()
+		}
+		mutex.Unlock()
+
+		fmt.Printf("Customer %d has finished getting a haircut\n", index)
+	} else {
+		fmt.Printf("Customer %d is leaving because the waiting room is full\n", index)
+		mutex.Unlock()
+	}
+}
+
+func main() {
+	go barber()
+	var wg sync.WaitGroup
+	for i := 0; i < MAX_CUSTOMERS; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			customer(index)
+		}(i)
+	}
+
+	wg.Wait()
+}
